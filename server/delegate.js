@@ -1,5 +1,5 @@
 // Delegasi: leader memecah tugas -> anggota tim mengerjakan -> leader mereview & merangkum.
-// Deterministik (dikendalikan server), jadi tidak bergantung pada tool-calling model kecil.
+// Memancarkan event terstruktur (bila didukung) agar frontend menampilkan bubble terpisah per anggota.
 import { agentsOf } from '../shared/roster.js';
 import { buildSystemPrompt } from './prompts.js';
 
@@ -25,7 +25,6 @@ function planPrompt(team) {
 
 export function parsePlan(text, team) {
   if (!text) return [];
-  // Ekstrak blok JSON pertama yang valid
   const m = String(text).match(/\{[\s\S]*\}/);
   if (!m) return [];
 
@@ -33,7 +32,6 @@ export function parsePlan(text, team) {
   try {
     obj = JSON.parse(m[0]);
   } catch {
-    // Coba bersihkan karakter escape atau trailing comma jika ada
     try {
       const cleaned = m[0].replace(/,\s*([}\]])/g, '$1');
       obj = JSON.parse(cleaned);
@@ -42,13 +40,11 @@ export function parsePlan(text, team) {
     }
   }
 
-  const ids = new Set(team.map((t) => t.id.toLowerCase()));
   const seen = new Set();
   const out = [];
 
   for (const t of Array.isArray(obj?.tugas) ? obj.tugas : []) {
     const rawId = String(t?.agent || '').toLowerCase().trim();
-    // Cocokkan id persis atau nama depan karyawan (misal: "maya" dari "Maya Anggraini")
     const matched = team.find((x) => x.id.toLowerCase() === rawId || x.name.toLowerCase().includes(rawId));
     const brief = String(t?.brief || '').trim().slice(0, 800);
 
@@ -60,8 +56,6 @@ export function parsePlan(text, team) {
   return out;
 }
 
-// Fallback cerdas: jika model gagal output JSON, server secara deterministik
-// menugaskan anggota tim yang paling relevan berdasarkan keyword pesan user.
 function heuristicPlan(userMsg, team) {
   const lower = userMsg.toLowerCase();
   const scored = team.map((member) => {
@@ -74,7 +68,6 @@ function heuristicPlan(userMsg, team) {
   });
 
   scored.sort((a, b) => b.score - a.score);
-  // Pilih anggota terbaik atau fallback ke anggota pertama
   const chosen = scored[0]?.score > 0 ? scored[0].member : team[0];
   return [{
     member: chosen,
@@ -91,12 +84,10 @@ export async function delegate({ leader, messages, run, modelFor, maxTokens, sen
     return;
   }
 
-  const lastMsg = messages[messages.length - 1].content;
-  // Jangan buang kata delegasi jika merusak makna, cukup ambil pesan utuh user
-  const userMsg = lastMsg;
+  const userMsg = messages[messages.length - 1].content;
 
   // 1) Rencana pembagian tugas
-  send({ t: `🧭 **${leader.name.split(' ')[0]}** sedang membagi tugas ke tim...\n\n` });
+  send({ event: 'system_note', text: `🧭 ${leader.name.split(' ')[0]} sedang membagi tugas ke tim...` });
   const planMessages = [{ role: 'user', content: `Permintaan user yang harus kamu bagi ke timmu:\n"${userMsg}"` }];
 
   const askPlan = async () => {
@@ -105,7 +96,7 @@ export async function delegate({ leader, messages, run, modelFor, maxTokens, sen
       model: modelFor(leader),
       system: buildSystemPrompt(leader) + '\n\n' + planPrompt(team),
       messages: planMessages,
-      maxTokens: 800, // Beri kuota cukup untuk model reasoning / JSON
+      maxTokens: 800,
       onText: (t) => { text += t; },
     });
     return text;
@@ -120,18 +111,21 @@ export async function delegate({ leader, messages, run, modelFor, maxTokens, sen
     plan = parsePlan(planText, team);
   }
 
-  // JIKA MODEL TETAP GAGAL MENGELUARKAN JSON:
-  // JANGAN menyerah / batalkan delegasi! Server otomatis menugaskan anggota yang cocok (misal: Maya).
   if (!plan.length) {
     console.warn('[delegate] Fallback ke penugasan otomatis heuristik tim.');
     plan = heuristicPlan(userMsg, team);
   }
 
-  // 2) Anggota tim langsung mengeksekusi tugasnya secara realtime
+  // 2) Anggota tim mengeksekusi tugas dalam bubble terpisah
   const results = [];
   for (const { member, brief } of plan) {
     if (isClosed()) return;
-    send({ t: `\n---\n### 👤 ${member.name.split(' ')[0]} (${member.role})\n_Tugas: ${brief}_\n\n` });
+    send({
+      event: 'speech_start',
+      agent: { id: member.id, name: member.name, role: member.role, division: member.division },
+      brief,
+    });
+
     let out = '';
     await run({
       model: modelFor(member),
@@ -145,19 +139,27 @@ export async function delegate({ leader, messages, run, modelFor, maxTokens, sen
       maxTokens,
       onText: (t) => {
         out += t;
-        send({ t });
+        send({ event: 'speech_delta', t });
       },
     });
-    results.push({ member, brief, out: out.trim() });
+
+    const cleanOut = out.trim();
+    results.push({ member, brief, out: cleanOut });
+    send({ event: 'speech_end', cleanText: cleanOut });
   }
 
-  // 3) Leader mereview hasil kerja tim dan memberikan kesimpulan akhir
+  // 3) Leader mereview dan merangkum dalam bubble kesimpulan
   if (isClosed()) return;
-  send({ t: `\n---\n### 🧑‍💼 Review & Rangkuman ${leader.name.split(' ')[0]}\n\n` });
+  send({
+    event: 'summary_start',
+    agent: { id: leader.id, name: leader.name, role: leader.role, division: leader.division },
+  });
+
   const bundle = results
     .map((r) => `## ${r.member.name} (${r.member.role})\nTugas: ${r.brief}\nHasil kerja:\n${r.out}`)
     .join('\n\n');
 
+  let rawSummary = '';
   await run({
     model: modelFor(leader),
     system: buildSystemPrompt(leader),
@@ -168,6 +170,11 @@ export async function delegate({ leader, messages, run, modelFor, maxTokens, sen
       },
     ],
     maxTokens,
-    onText: (t) => send({ t }),
+    onText: (t) => {
+      rawSummary += t;
+      send({ event: 'summary_delta', t });
+    },
   });
+
+  send({ event: 'summary_end', cleanText: rawSummary.trim() });
 }

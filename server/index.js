@@ -239,7 +239,25 @@ app.post('/api/chat', requireAccess, rateLimit, dailyCap, async (req, res) => {
 
       const last = messages[messages.length - 1].content;
       if (agent.leader && wantsDelegation(last)) {
-        await delegate({ leader: agent, messages, run, modelFor, maxTokens: MAX_TOKENS, send: (o) => (o?.t ? emit(o.t) : (!closed && send(o))), isClosed: () => closed });
+        await delegate({
+          leader: agent,
+          messages,
+          run,
+          modelFor,
+          maxTokens: MAX_TOKENS,
+          send: (o) => {
+            if (closed) return;
+            if (o?.event) {
+              outChars += 1;
+              send(o);
+            } else if (o?.t) {
+              emit(o.t);
+            } else {
+              send(o);
+            }
+          },
+          isClosed: () => closed,
+        });
       } else {
         await run({ model: modelFor(agent), system: buildSystemPrompt(agent), messages, maxTokens: MAX_TOKENS, onText: emit });
       }

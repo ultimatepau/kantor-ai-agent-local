@@ -122,11 +122,37 @@ async function readSSE(res, onText) {
   return full;
 }
 
-// Mengirim riwayat + pesan baru. Memanggil onText(potongan) saat streaming.
+// Mengirim riwayat + pesan baru. Memanggil onText(potongan, full) atau onEvent(evt) bila server memancarkan event delegasi.
 // Melempar Error dengan .code === 401 bila kode akses salah.
-export async function streamChat(agentId, messages, { onText, signal }) {
+export async function streamChat(agentId, messages, { onText, onEvent, signal }) {
   const res = await postJSON('/api/chat', { agentId, messages }, signal);
-  return readSSE(res, onText);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let full = '';
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buffer.indexOf('\n\n')) >= 0) {
+      const raw = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 2);
+      if (!raw.startsWith('data:')) continue;
+      let evt;
+      try { evt = JSON.parse(raw.slice(5).trim()); } catch { continue; }
+      if (evt.error) throw new Error(evt.error);
+      if (evt.event && onEvent) {
+        onEvent(evt);
+      }
+      if (evt.t) {
+        full += evt.t;
+        onText?.(evt.t, full);
+      }
+    }
+  }
+  return full;
 }
 
 // Diskusi tim: server yang mengatur giliran sampai tujuan tercapai. Mengirim event terstruktur ke onEvent.

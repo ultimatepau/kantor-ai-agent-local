@@ -483,10 +483,86 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
     onStatus(id, 'working');
     syncSend();
 
+    let currentBubble = null;
+    let currentBubbleText = '';
+    let isDelegated = false;
+
     try {
       const full = await streamChat(id, sent, {
         signal: l.abort.signal,
+        onEvent: (evt) => {
+          isDelegated = true;
+          // Buang bubble typing awal jika ini delegasi
+          if (l.el) {
+            l.el.remove();
+            l.el = null;
+          }
+
+          switch (evt.event) {
+            case 'system_note':
+              els.messages.appendChild(systemPill(evt.text));
+              scrollDown(true);
+              break;
+
+            case 'speech_start':
+              currentBubbleText = '';
+              currentBubble = bubbleWithAuthor(evt.agent, typingHtml, false);
+              if (evt.brief) {
+                const sub = document.createElement('div');
+                sub.style.cssText = 'font-size:11px;color:var(--ink-soft);font-style:italic;margin-bottom:6px;';
+                sub.textContent = `Tugas: ${evt.brief}`;
+                currentBubble.querySelector('.bubble').appendChild(sub);
+              }
+              els.messages.appendChild(currentBubble);
+              onStatus(evt.agent.id, 'working');
+              scrollDown(true);
+              break;
+
+            case 'speech_delta':
+              currentBubbleText += evt.t;
+              if (currentBubble) {
+                currentBubble.querySelector('.bubble').innerHTML = renderMarkdown(currentBubbleText);
+                scrollDown();
+              }
+              break;
+
+            case 'speech_end':
+              if (currentBubble) {
+                currentBubble.querySelector('.bubble').innerHTML = renderMarkdown(evt.cleanText || currentBubbleText);
+                currentBubble = null;
+                currentBubbleText = '';
+                scrollDown(true);
+              }
+              break;
+
+            case 'summary_start':
+              currentBubbleText = '';
+              currentBubble = bubbleWithAuthor(evt.agent, typingHtml, true);
+              els.messages.appendChild(currentBubble);
+              onStatus(evt.agent.id, 'working');
+              scrollDown(true);
+              break;
+
+            case 'summary_delta':
+              currentBubbleText += evt.t;
+              if (currentBubble) {
+                currentBubble.querySelector('.bubble').innerHTML = renderMarkdown(currentBubbleText);
+                scrollDown();
+              }
+              break;
+
+            case 'summary_end':
+              if (currentBubble) {
+                currentBubble.querySelector('.bubble').innerHTML = renderMarkdown(evt.cleanText || currentBubbleText);
+                currentBubble = null;
+                currentBubbleText = '';
+                scrollDown(true);
+              }
+              break;
+          }
+        },
         onText: (_t, all) => {
+          if (isDelegated) return;
           l.text = all;
           if (!l.raf) {
             l.raf = requestAnimationFrame(() => {
@@ -496,9 +572,13 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
           }
         },
       });
-      setHistory(id, [...sent, { role: 'assistant', content: full }]);
+
+      // Simpan riwayat chat
+      setHistory(id, [...sent, { role: 'assistant', content: isDelegated ? 'Tugas tim selesai.' : full }]);
       live.delete(id);
-      if (l.el && currentId === id) l.el.querySelector('.bubble').innerHTML = renderMarkdown(full);
+      if (!isDelegated && l.el && currentId === id) {
+        l.el.querySelector('.bubble').innerHTML = renderMarkdown(full);
+      }
       onStatus(id, 'done');
     } catch (err) {
       live.delete(id);
