@@ -23,29 +23,28 @@ export function dropInbox(id) {
 }
 
 const ROOM_EXTRA = [
-  'MODE RAPAT / TOWNHALL: kamu duduk bersama rekan kerja untuk menuntaskan satu tujuan.',
-  'Aturan wajib:',
-  '1. Bicara padat dan tegas (maksimal 100-150 kata). Langsung ke inti pandanganmu tanpa basa-basi pembuka/penutup.',
-  '2. Bicaralah dari sudut pandang keahlianmu. Bangun di atas ucapan rekan sebelumnya (setujui singkat / sanggah dengan alasan konkret).',
-  '3. Jangan mengulang poin yang sudah disepakati.',
-  '4. Jangan mencantumkan garis pembatas markdown seperti "---" di dalam jawabanmu.',
-  '5. KRUSIAL: Jika menurutmu tujuan rapat ini sudah tercapai (sudah ada kesepakatan solusi, pembagian tugas, atau jawaban tuntas atas apa yang diminta user), tulis ringkasan keputusanmu lalu letakkan kata persis "SELESAI" di baris paling terakhir sendiri.',
+  'MODE RAPAT / DEBAT TIM: kamu duduk bersama rekan kerja untuk menuntaskan satu tujuan.',
+  'Aturan wajib dinamika diskusi:',
+  '1. UJI KRITIS & DEBAT: Jangan langsung setuju begitu saja jika melihat ada kelemahan teknis, risiko, atau opsi yang lebih efektif dari sudut keahlianmu. Sanggah atau tawarkan alternatif yang lebih baik.',
+  '2. HAK PASS (TIDAK MENJAWAB): Jika rekan sebelumnya sudah menyampaikan hal yang persis sama dengan pandanganmu dan kamu SEPENUHNYA SEPAKAT tanpa ada sanggahan/tambahan baru, balas HANYA dengan satu kata persis: "PASS". Jangan mengulang poin atau basa-basi "gue setuju".',
+  '3. FOKUS & SINGKAT: Jika berbicara, batasi 80-140 kata. Langsung sebut nama rekan yang kamu tanggapi.',
+  '4. JANGAN gunakan garis pemisah markdown seperti "---" di teks jawaban.',
+  '5. KESEPAKATAN FINAL: Bila perdebatan sudah tuntas, semua pihak sudah saling mufakat atas solusi konkret, tulis keputusan akhirmu dan letakkan kata persis "SELESAI" di baris paling terakhir sendiri.',
 ].join('\n');
 
 const CHECK_PROMPT = [
   'Kamu adalah ketua sidang/moderator rapat yang tegas dan objektif.',
-  'Tugasmu menilai apakah tujuan rapat sudah tercapai dari transkrip yang ada.',
+  'Tugasmu menilai apakah perdebatan/diskusi sudah tuntas mencapai konsensus.',
   '',
-  'Kriteria selesai (cukup penuhi MINIMAL SATU dari ini):',
-  'A. Sudah ada keputusan/solusi konkret yang disepakati untuk pertanyaan user.',
-  'B. Sudah ada rencana tindak lanjut / pembagian tugas yang jelas.',
-  'C. Semua peserta sudah sepakat dan tidak ada lagi perdebatan aktif atau pertanyaan baru.',
-  'D. Peserta sudah saling mengulang poin yang sama (konsensus tercapai).',
+  'Kriteria selesai (hanya boleh selesai jika):',
+  '- Sudah ada solusi/arsitektur/rencana konkret yang disepakati.',
+  '- Tidak ada lagi perdebatan aktif, penolakan, atau pertanyaan baru yang belum dijawab rekan lain.',
+  '- Peserta yang lain sudah PASS (setuju) atau mengonfirmasi kesepakatan.',
   '',
   'Balas HANYA JSON valid satu baris, tanpa markdown, tanpa ```, tanpa kalimat lain:',
   '{"selesai":true,"alasan":"<alasan maksimal 15 kata>"}',
-  'atau bila benar-benar masih butuh perdebatan kritis yang belum terjawab:',
-  '{"selesai":false,"alasan":"<poin yang masih menggantung, maks 15 kata>"}',
+  'atau bila masih ada sanggahan atau pertanyaan yang belum dijawab:',
+  '{"selesai":false,"alasan":"<poin debat yang masih berlangsung, maks 15 kata>"}',
 ].join('\n');
 
 function parseCheck(text) {
@@ -58,6 +57,13 @@ function parseCheck(text) {
   } catch {
     return null;
   }
+}
+
+// Cek apakah agent memilih PASS (tidak menjawab karena sudah sependapat)
+function isPass(text) {
+  if (!text) return true;
+  const clean = text.trim().replace(/[*_#`."']/g, '').toUpperCase();
+  return clean === 'PASS' || clean.startsWith('PASS ') || clean === 'LEWAT';
 }
 
 // Cek apakah ada deklarasi kata SELESAI di baris terakhir/mandiri ucapan agent
@@ -126,33 +132,71 @@ export async function discuss({ id, topic, history = [], team, run, leaderModel,
     team: team.map((a) => ({ id: a.id, name: a.name, role: a.role, division: a.division })),
   });
 
-  const speak = async (agent) => {
-    send({
-      event: 'speech_start',
-      agent: { id: agent.id, name: agent.name, role: agent.role, division: agent.division },
-    });
+  const speak = async (agent, round) => {
     let rawOut = '';
+    let speechStarted = false;
+
     await run({
       model: modelFor(agent),
       system: buildSystemPrompt(agent) + '\n\n' + ROOM_EXTRA,
       messages: [
         {
           role: 'user',
-          content: `Transkrip rapat sejauh ini:\n\n${transcriptText(kept())}\n\nSekarang giliranmu (${agent.name}, ${agent.role}). Jawab sesuai aturan rapat.`,
+          content:
+            `Transkrip rapat sejauh ini:\n\n${transcriptText(kept())}\n\n` +
+            `Sekarang giliranmu (${agent.name}, ${agent.role}) pada Ronde ${round}.\n` +
+            `- Bila ada sanggahan/pandangan lain, sebut nama rekanmu dan sampaikan argumen konkretmu.\n` +
+            `- Bila kamu SEPENUHNYA SEPAKAT dengan solusi rekanmu dan tidak ada hal baru yang perlu didebatkan, cukup balas: PASS`,
         },
       ],
       maxTokens,
       onText: (t) => {
         rawOut += t;
-        send({ event: 'speech_delta', t });
+        // Hanya stream ke UI jika ternyata bukan cuma PASS
+        if (!speechStarted && rawOut.length > 10 && !isPass(rawOut)) {
+          speechStarted = true;
+          send({
+            event: 'speech_start',
+            agent: { id: agent.id, name: agent.name, role: agent.role, division: agent.division },
+          });
+          send({ event: 'speech_delta', t: rawOut });
+        } else if (speechStarted) {
+          send({ event: 'speech_delta', t });
+        }
       },
     });
 
     const sanitized = sanitizeReply(rawOut);
+
+    // KASUS 1: Agent memilih PASS (tidak menjawab karena sependapat)
+    if (isPass(sanitized)) {
+      send({
+        event: 'system_note',
+        text: `${agent.name.split(' ')[0]} sependapat & menyetujui solusi sebelumnya`,
+      });
+      transcript.push({ who: `${agent.name} (${agent.role})`, text: 'Menyetujui solusi sebelumnya.' });
+      return { pass: true, finished: false };
+    }
+
+    // Jika belum sempat kirim speech_start (karena teks pendek) tapi bukan pass
+    if (!speechStarted) {
+      send({
+        event: 'speech_start',
+        agent: { id: agent.id, name: agent.name, role: agent.role, division: agent.division },
+      });
+      send({ event: 'speech_delta', t: sanitized });
+    }
+
     const { finished, cleanText } = detectFinished(sanitized);
     transcript.push({ who: `${agent.name} (${agent.role})`, text: cleanText.slice(0, MAX_ENTRY_CHARS) });
     send({ event: 'speech_end', cleanText, who: `${agent.name} (${agent.role})` });
-    return finished ? `${agent.name.split(' ')[0]} menyatakan tujuan tercapai` : null;
+
+    // Jangan izinkan SELESAI di ronde 1 bila anggota cuma 2 orang (biar ada minimal 1x konfirmasi/tanggapan balik)
+    const canFinish = round > 1 || team.length > 3;
+    return {
+      pass: false,
+      finished: canFinish && finished ? `${agent.name.split(' ')[0]} menyatakan kesepakatan tercapai` : null,
+    };
   };
 
   const wrapUp = async (reason) => {
@@ -170,8 +214,8 @@ export async function discuss({ id, topic, history = [], team, run, leaderModel,
         {
           role: 'user',
           content:
-            `Tujuan rapat:\n${topic}\n\nTranskrip rapat:\n\n${transcriptText(kept())}\n\n` +
-            'Tulis RANGKUMAN KEPUTUSAN FINAL: apa keputusan yang disepakati bersama, siapa mengerjakan apa (action items konkret), dan kesimpulan akhir. Padat dan siap dieksekusi.',
+            `Tujuan rapat:\n${topic}\n\nTranskrip perdebatan & diskusi:\n\n${transcriptText(kept())}\n\n` +
+            'Tulis RANGKUMAN KEPUTUSAN FINAL: apa mufakat/keputusan akhir yang disepakati bersama, bagaimana kompromi atas perdebatan yang terjadi, dan pembagian tugas konkret siap pakai.',
         },
       ],
       maxTokens,
@@ -187,17 +231,24 @@ export async function discuss({ id, topic, history = [], team, run, leaderModel,
 
   for (let round = 1; ; round++) {
     let finishedSignal = null;
+    let allPassed = true;
 
     for (const agent of team) {
       if (isClosed()) return;
       drain();
       if (isClosed()) return;
-      const sig = await speak(agent);
-      if (sig && !finishedSignal) finishedSignal = sig;
+      const res = await speak(agent, round);
+      if (!res.pass) allPassed = false;
+      if (res.finished && !finishedSignal) finishedSignal = res.finished;
     }
     if (isClosed()) return;
     drain();
-    if (isClosed()) return;
+
+    // Jika di ronde ini SEMUA agent memilih PASS, artinya tidak ada lagi yang perlu didebatkan!
+    if (allPassed && round > 1) {
+      await wrapUp('semua pihak telah sepakat');
+      return;
+    }
 
     if (finishedSignal) {
       await wrapUp(finishedSignal);
@@ -209,7 +260,7 @@ export async function discuss({ id, topic, history = [], team, run, leaderModel,
       return;
     }
 
-    send({ event: 'system_note', text: `Mengecek hasil ronde ${round}...` });
+    send({ event: 'system_note', text: `Mengecek apakah perdebatan ronde ${round} sudah mufakat...` });
 
     let check = null;
     for (let attempt = 0; attempt < 2 && !check && !isClosed(); attempt++) {
@@ -217,7 +268,7 @@ export async function discuss({ id, topic, history = [], team, run, leaderModel,
       await run({
         model: leaderModel,
         system: CHECK_PROMPT,
-        messages: [{ role: 'user', content: `Tujuan rapat:\n${topic}\n\nTranskrip rapat:\n\n${transcriptText(kept())}` }],
+        messages: [{ role: 'user', content: `Tujuan rapat:\n${topic}\n\nTranskrip debat:\n\n${transcriptText(kept())}` }],
         maxTokens: 500,
         onText: (t) => { raw += t; },
       });
@@ -226,7 +277,7 @@ export async function discuss({ id, topic, history = [], team, run, leaderModel,
     if (isClosed()) return;
 
     if (check?.selesai) {
-      await wrapUp(check.alasan || 'tujuan tercapai');
+      await wrapUp(check.alasan || 'mufakat tercapai');
       return;
     }
 
@@ -236,14 +287,14 @@ export async function discuss({ id, topic, history = [], team, run, leaderModel,
         await wrapUp('konsensus ronde tercapai');
         return;
       }
-      send({ event: 'system_note', text: `Ronde ${round} selesai. Lanjut ronde berikutnya.` });
+      send({ event: 'system_note', text: `Ronde ${round} selesai. Lanjut perdebatan ronde berikutnya.` });
       continue;
     }
 
     badChecks = 0;
     send({
       event: 'system_note',
-      text: `Ronde ${round} selesai${check.alasan ? ` (${check.alasan})` : ''}. Lanjut ronde ${round + 1}.`,
+      text: `Ronde ${round} belum mufakat (${check.alasan || 'masih berdebat'}). Lanjut ronde ${round + 1}.`,
     });
   }
 }
