@@ -83,9 +83,25 @@ function sanitizeReply(text) {
 
 // run({ model, system, messages, maxTokens, onText }) -> Promise (disediakan index.js)
 // send(eventObj)
-export async function discuss({ id, topic, team, run, leaderModel, modelFor, maxTokens, maxRounds, send, isClosed }) {
+export async function discuss({ id, topic, history = [], team, run, leaderModel, modelFor, maxTokens, maxRounds, send, isClosed }) {
   inbox.set(id, []);
-  const transcript = [{ who: null, text: `Tujuan diskusi (dari user):\n${topic}` }];
+
+  // Format transkrip awal dari history sebelumnya (jika ada) + prompt topik baru
+  const transcript = [];
+  if (Array.isArray(history) && history.length) {
+    for (const h of history) {
+      if (h && typeof h.text === 'string') {
+        transcript.push({
+          who: h.who ? String(h.who).slice(0, 60) : null,
+          text: String(h.text).slice(0, MAX_ENTRY_CHARS),
+        });
+      }
+    }
+    transcript.push({ who: 'User (moderator)', text: `Tanggapan / arahan baru:\n${topic}` });
+  } else {
+    transcript.push({ who: null, text: `Tujuan diskusi (dari user):\n${topic}` });
+  }
+
   let badChecks = 0;
 
   const kept = () =>
@@ -98,7 +114,7 @@ export async function discuss({ id, topic, team, run, leaderModel, modelFor, max
     const q = inbox.get(id) || [];
     inbox.set(id, []);
     for (const t of q) {
-      transcript.push({ who: 'Lo (moderator)', text: t });
+      transcript.push({ who: 'User (moderator)', text: t });
       send({ event: 'user_interrupt', text: t });
     }
   };
@@ -106,6 +122,7 @@ export async function discuss({ id, topic, team, run, leaderModel, modelFor, max
   send({
     event: 'start',
     topic,
+    isFollowUp: Array.isArray(history) && history.length > 0,
     team: team.map((a) => ({ id: a.id, name: a.name, role: a.role, division: a.division })),
   });
 
@@ -134,7 +151,7 @@ export async function discuss({ id, topic, team, run, leaderModel, modelFor, max
     const sanitized = sanitizeReply(rawOut);
     const { finished, cleanText } = detectFinished(sanitized);
     transcript.push({ who: `${agent.name} (${agent.role})`, text: cleanText.slice(0, MAX_ENTRY_CHARS) });
-    send({ event: 'speech_end', cleanText });
+    send({ event: 'speech_end', cleanText, who: `${agent.name} (${agent.role})` });
     return finished ? `${agent.name.split(' ')[0]} menyatakan tujuan tercapai` : null;
   };
 
@@ -163,7 +180,8 @@ export async function discuss({ id, topic, team, run, leaderModel, modelFor, max
         send({ event: 'summary_delta', t });
       },
     });
-    send({ event: 'summary_end', cleanText: sanitizeReply(rawSummary) });
+    const finalClean = sanitizeReply(rawSummary);
+    send({ event: 'summary_end', cleanText: finalClean, who: `Kesimpulan (${chair.name.split(' ')[0]})` });
     send({ event: 'closed', reason });
   };
 

@@ -130,8 +130,8 @@ export async function streamChat(agentId, messages, { onText, signal }) {
 }
 
 // Diskusi tim: server yang mengatur giliran sampai tujuan tercapai. Mengirim event terstruktur ke onEvent.
-export async function streamDiscuss(id, topic, participants, { onEvent, signal }) {
-  const res = await postJSON('/api/discuss', { id, topic, participants }, signal);
+export async function streamDiscuss(id, topic, participants, history = [], { onEvent, signal }) {
+  const res = await postJSON('/api/discuss', { id, topic, participants, history }, signal);
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';

@@ -29,6 +29,8 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
   let discussMode = false;
   let activeDiscuss = null; // { id, topic, participants, text, el, abort }
   let selectedParticipants = new Set();
+  const discussHistory = new Map(); // agentId/host -> [{ who, text }]
+  const discussDoms = new Map(); // agentId/host -> HTMLElement[] anak-anak dom chat rapat
 
   const scrollDown = (force = false) => {
     const m = els.messages;
@@ -186,7 +188,12 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
     }
 
     if (discussMode) {
-      renderDiscussSetup();
+      const pastDoms = discussDoms.get(agentId) || [];
+      if (pastDoms.length) {
+        for (const node of pastDoms) els.messages.appendChild(node);
+      } else {
+        renderDiscussSetup();
+      }
       scrollDown(true);
       syncSend();
       return;
@@ -267,12 +274,16 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
 
   async function submitDiscuss(topic) {
     topic = (topic || '').trim();
-    if (!topic || activeDiscuss || selectedParticipants.size < 2) return;
+    const hostId = currentId;
+    if (!topic || activeDiscuss || selectedParticipants.size < 2 || !hostId) return;
 
     const list = Array.from(selectedParticipants);
     const discId = `disc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const currentHist = discussHistory.get(hostId) || [];
+
     const d = {
       id: discId,
+      hostId,
       topic,
       participants: list,
       currentBubble: null,
@@ -281,11 +292,19 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
     };
     activeDiscuss = d;
 
-    els.messages.innerHTML = '';
-    const banner = document.createElement('div');
-    banner.className = 'discuss-banner';
-    banner.innerHTML = `<span>👥 Rapat: <b>${topic.slice(0, 60)}</b> (${list.length} orang)</span>`;
-    els.messages.appendChild(banner);
+    // Bersihkan form setup awal bila ini pesan pertama
+    els.messages.querySelector('.discuss-setup')?.remove();
+
+    // Jika ini diskusi baru (bukan lanjutan), tambahkan banner
+    if (!currentHist.length) {
+      const banner = document.createElement('div');
+      banner.className = 'discuss-banner';
+      banner.innerHTML = `<span>👥 Rapat: <b>${topic.slice(0, 60)}</b> (${list.length} orang)</span>`;
+      els.messages.appendChild(banner);
+    } else {
+      // Jika kelanjutan, tambahkan bubble user dengan jelas di transkrip
+      els.messages.appendChild(bubble('user', '', { text: topic }));
+    }
 
     els.input.value = '';
     autosize();
@@ -300,18 +319,26 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
       scrollDown();
     };
 
+    const remember = (who, text) => {
+      if (!text) return;
+      const h = discussHistory.get(hostId) || [];
+      h.push({ who, text });
+      discussHistory.set(hostId, h);
+    };
+
     try {
-      await streamDiscuss(discId, topic, list, {
+      await streamDiscuss(discId, topic, list, currentHist, {
         signal: d.abort.signal,
         onEvent: (evt) => {
           switch (evt.event) {
             case 'start':
-              els.messages.appendChild(systemPill(`Rapat dimulai dengan tujuan: "${topic}"`));
+              els.messages.appendChild(systemPill(evt.isFollowUp ? `Arahan baru: "${topic}"` : `Rapat dimulai dengan tujuan: "${topic}"`));
               scrollDown(true);
               break;
 
             case 'user_interrupt':
               els.messages.appendChild(bubble('user', '', { text: evt.text }));
+              remember('User (moderator)', evt.text);
               scrollDown(true);
               break;
 
@@ -329,7 +356,9 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
 
             case 'speech_end':
               if (d.currentBubble) {
-                d.currentBubble.querySelector('.bubble').innerHTML = renderMarkdown(evt.cleanText || d.currentText);
+                const clean = evt.cleanText || d.currentText;
+                d.currentBubble.querySelector('.bubble').innerHTML = renderMarkdown(clean);
+                remember(evt.who || `${evt.agent?.name}`, clean);
                 d.currentBubble = null;
                 d.currentText = '';
                 scrollDown(true);
@@ -350,7 +379,9 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
 
             case 'summary_end':
               if (d.currentBubble) {
-                d.currentBubble.querySelector('.bubble').innerHTML = renderMarkdown(evt.cleanText || d.currentText);
+                const clean = evt.cleanText || d.currentText;
+                d.currentBubble.querySelector('.bubble').innerHTML = renderMarkdown(clean);
+                remember(evt.who || 'Kesimpulan', clean);
                 d.currentBubble = null;
                 d.currentText = '';
                 scrollDown(true);
@@ -369,9 +400,13 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
           }
         },
       });
+
+      // Simpan DOM saat ini untuk host tersebut
+      discussDoms.set(hostId, Array.from(els.messages.children));
       activeDiscuss = null;
       for (const pid of list) onStatus(pid, 'done');
     } catch (err) {
+      discussDoms.set(hostId, Array.from(els.messages.children));
       activeDiscuss = null;
       for (const pid of list) onStatus(pid, 'idle');
       if (err.name !== 'AbortError') {
@@ -522,6 +557,8 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
     if (!currentId) return;
     live.get(currentId)?.abort.abort();
     clearHistory(currentId);
+    discussHistory.delete(currentId);
+    discussDoms.delete(currentId);
     render(currentId);
   });
   els.messages.addEventListener('click', (e) => {

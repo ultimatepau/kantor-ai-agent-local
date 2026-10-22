@@ -269,6 +269,7 @@ app.post('/api/discuss/say', requireAccess, rateLimit, (req, res) => {
 app.post('/api/discuss', requireAccess, rateLimit, dailyCap, async (req, res) => {
   const topic = String(req.body?.topic || '').trim();
   const discId = String(req.body?.id || '').slice(0, 64);
+  const history = Array.isArray(req.body?.history) ? req.body.history : [];
   if (!discId) return res.status(400).json({ error: 'ID diskusi tidak valid.' });
   if (topic.length < 3) return res.status(400).json({ error: 'Tulis tujuan diskusinya dulu (minimal 3 karakter).' });
 
@@ -323,6 +324,7 @@ app.post('/api/discuss', requireAccess, rateLimit, dailyCap, async (req, res) =>
       await discuss({
         id: discId,
         topic,
+        history,
         team,
         run: runner.run,
         leaderModel: MODEL_LEADER,
