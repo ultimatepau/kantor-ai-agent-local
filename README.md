@@ -65,9 +65,11 @@ Salin `.env.example` menjadi `.env`, lalu isi sesuai kebutuhan.
 | `PORT` | `3001` | Port server backend. |
 | `MODEL_LEADER` | `claude-sonnet-5-5` | Model untuk leader divisi. Awali `local:` untuk model lokal, mis. `local:qwen3-4b`. |
 | `MODEL_TEAM` | `claude-haiku-4-5-20251001` | Model untuk anggota tim. Boleh dicampur: leader Claude, tim lokal. |
-| `MAX_TOKENS` | `1500` | Panjang maksimal jawaban. Untuk model lokal di CPU, pakai `350`-`700`. |
+| `MAX_TOKENS` | `0` | Panjang maksimal jawaban. **`0` = tanpa batas** (tidak mengirim `max_tokens`, jadi server model memakai maksimum bawaannya). Isi angka (mis. `900`) untuk membatasi. Untuk model lokal di CPU, pakai `350`-`700`. |
 | `LOCAL_LLM_URL` | `http://127.0.0.1:8080/v1` | Alamat server model lokal (llama-server / LM Studio / Ollama). |
-| `LOCAL_NO_THINK` | `1` | `1` = matikan mode thinking Qwen3. **Isi `0` untuk Qwen3-4B-Instruct-2507.** |
+| `LOCAL_NO_THINK` | `1` | `1` = matikan mode reasoning/thinking (Qwen3, DeepSeek, dll). **Untuk model reasoning, biarkan `1`** — kalau `0`, token reasoning ikut memakan `MAX_TOKENS` dan jawaban bisa kosong/terpotong. **Isi `0` untuk Qwen3-4B-Instruct-2507.** |
+
+> **Kalau jawaban terpotong:** token reasoning dihitung ke `MAX_TOKENS`. Gateway yang tidak mengenali `chat_template_kwargs.thinking` / `enable_thinking` (mis. gateway gaya OpenRouter) sudah ditangani dengan mengirim `reasoning: { enabled: false }` juga — lihat `server/local.js`. Kalau `finish_reason` = `length`, log menulis `TERPOTONG(finish=length)` dan chat menampilkan peringatan.
 | `RATE_PER_MINUTE` | `15` | Batas request per IP per menit. |
 | `DAILY_MAX_REQUESTS` | `300` | Batas total request per hari (jam Jakarta). |
 
@@ -340,6 +342,8 @@ Pastikan di terminal muncul `Mode: LIVE  leader=local:qwen3-4b ... (model lokal:
 | Server model lokal tidak bisa dihubungi | `llama-server` belum jalan atau port/`LOCAL_LLM_URL` tidak cocok |
 | Sangat lambat | Pakai model 4B, `MAX_TOKENS=350`, `-c 4096`, tutup aplikasi berat. Pesan pertama selalu paling lama (membaca prompt). Mulai chat baru kalau riwayat sudah panjang |
 | Jawaban berisi teks aneh `/no_think` | Set `LOCAL_NO_THINK=0` untuk Qwen3-4B-Instruct-2507 |
+| Jawaban kosong / bubble kosong (model reasoning) | Set `LOCAL_NO_THINK=1` dan/atau naikkan `MAX_TOKENS`. Server sekarang mengirim tiga flag sekaligus (`chat_template_kwargs.thinking`, `enable_thinking`, `reasoning.enabled`) karena gateway gaya OpenRouter hanya patuh pada yang terakhir |
+| Jawaban terpotong di tengah kalimat | Set `MAX_TOKENS=0` (tanpa batas) atau naikkan angkanya; kalau token reasoning ikut terpakai, set `LOCAL_NO_THINK=1`. Server menandai `TERPOTONG(finish=length)` di log dan menampilkan peringatan di chat |
 | `npm.ps1 cannot be loaded` | Pakai `cmd` atau `npm.cmd run dev` (lihat bab 2) |
 | Port 8080 dipakai | Jalankan dengan `--port 8081` dan ubah `LOCAL_LLM_URL` ke `:8081` |
 

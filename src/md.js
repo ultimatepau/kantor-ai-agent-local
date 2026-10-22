@@ -14,12 +14,30 @@ function inline(text) {
   return s;
 }
 
+// Cek apakah satu baris adalah baris tabel (| cell | cell |)
+const isTableRow = (l) => /^\s*\|.*\|\s*$/.test(l);
+// Cek apakah baris pemisah header (|---|:---:|---|)
+const isTableSep = (l) => /^\s*\|(?:\s*:?-+:?\s*\|)+\s*$/.test(l);
+
+function parseTableCells(line) {
+  return line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((c) => c.trim());
+}
+
 export function renderMarkdown(src) {
   const lines = String(src).replace(/\r\n/g, '\n').split('\n');
   const out = [];
   let i = 0;
 
-  const isBlockStart = (l) => /^```/.test(l) || /^\s*([-*•]|\d+[.)])\s+/.test(l) || /^#{1,4}\s+/.test(l);
+  const isBlockStart = (l) =>
+    /^```/.test(l) ||
+    /^\s*([-*•]|\d+[.)])\s+/.test(l) ||
+    /^#{1,4}\s+/.test(l) ||
+    isTableRow(l);
 
   while (i < lines.length) {
     const line = lines[i];
@@ -33,6 +51,24 @@ export function renderMarkdown(src) {
       }
       i += 1; // lewati penutup (atau akhir stream)
       out.push(`<pre><button type="button" class="copy">Salin</button><code>${esc(buf.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    // Markdown Table
+    if (isTableRow(line) && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      const headerCells = parseTableCells(line);
+      i += 2; // lewati header dan baris pemisah
+
+      const rows = [];
+      while (i < lines.length && isTableRow(lines[i])) {
+        const cells = parseTableCells(lines[i]);
+        rows.push(`<tr>${cells.map((c) => `<td>${inline(c)}</td>`).join('')}</tr>`);
+        i += 1;
+      }
+
+      const thead = `<thead><tr>${headerCells.map((c) => `<th>${inline(c)}</th>`).join('')}</tr></thead>`;
+      const tbody = `<tbody>${rows.join('')}</tbody>`;
+      out.push(`<div class="table-wrap"><table>${thead}${tbody}</table></div>`);
       continue;
     }
 

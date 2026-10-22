@@ -3,7 +3,7 @@ import { DIVISIONS, agentById, divisionById } from '../shared/roster.js';
 import { createStage } from './stage.js';
 import { createTags } from './tags.js';
 import { createPanel } from './panel.js';
-import { fetchConfig, getCode, setCode } from './chat.js';
+import { fetchConfig, updateModels, fetchRemoteModels, getCode, setCode } from './chat.js';
 import { PITCH_X, PITCH_Z } from './office.js';
 
 const $ = (id) => document.getElementById(id);
@@ -144,6 +144,99 @@ addEventListener('keydown', (e) => {
 });
 addEventListener('resize', () => requestAnimationFrame(setInset));
 mobile.addEventListener?.('change', () => requestAnimationFrame(setInset));
+
+// ---------- modal settings ----------
+const settingsModal = $('settings-modal');
+const btnSettings = $('btn-settings');
+const btnCloseSettings = $('btn-close-settings');
+const settingsForm = $('settings-form');
+const inputBaseUrl = $('set-base-url');
+const inputApiKey = $('set-api-key');
+const inputLeader = $('set-model-leader');
+const inputTeam = $('set-model-team');
+const btnFetchModels = $('btn-fetch-models');
+const modelsDatalist = $('models-datalist');
+const statusSpan = $('settings-status');
+
+btnSettings.addEventListener('click', () => {
+  inputBaseUrl.value = config.localUrl || '';
+  inputApiKey.value = '';
+  inputLeader.value = config.modelLeader || '';
+  inputTeam.value = config.modelTeam || '';
+  statusSpan.hidden = true;
+  settingsModal.hidden = false;
+});
+
+btnCloseSettings.addEventListener('click', () => {
+  settingsModal.hidden = true;
+});
+
+// Tutup modal jika klik di latar gelap luar kartu
+settingsModal.addEventListener('click', (e) => {
+  if (e.target === settingsModal) settingsModal.hidden = true;
+});
+
+btnFetchModels.addEventListener('click', async () => {
+  const base = inputBaseUrl.value.trim();
+  const key = inputApiKey.value.trim();
+  statusSpan.hidden = false;
+  statusSpan.style.color = 'var(--ink-soft)';
+  statusSpan.textContent = 'Menghubungi endpoint model...';
+  btnFetchModels.disabled = true;
+
+  try {
+    const res = await fetchRemoteModels(base, key || undefined);
+    const models = res.models || [];
+    if (!models.length) {
+      statusSpan.style.color = '#b45309';
+      statusSpan.textContent = 'Endpoint merespons tapi tidak ada model yang terdaftar.';
+      return;
+    }
+    // Update datalist autocomplete options
+    modelsDatalist.innerHTML = '';
+    for (const m of models) {
+      const opt = document.createElement('option');
+      opt.value = `local:${m}`;
+      modelsDatalist.appendChild(opt);
+    }
+    statusSpan.style.color = '#15803d';
+    statusSpan.textContent = `✓ Berhasil memuat ${models.length} model! Klik input untuk memilih.`;
+  } catch (err) {
+    statusSpan.style.color = '#b91c1c';
+    statusSpan.textContent = err.message;
+  } finally {
+    btnFetchModels.disabled = false;
+  }
+});
+
+settingsForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const localUrl = inputBaseUrl.value.trim();
+  const localKey = inputApiKey.value.trim();
+  const leader = inputLeader.value.trim();
+  const team = inputTeam.value.trim();
+  statusSpan.hidden = false;
+  statusSpan.style.color = 'var(--ink-soft)';
+  statusSpan.textContent = 'Menerapkan...';
+
+  try {
+    const res = await updateModels({
+      modelLeader: leader,
+      modelTeam: team,
+      localUrl,
+      localKey: localKey ? localKey : undefined,
+    });
+    config.modelLeader = res.modelLeader;
+    config.modelTeam = res.modelTeam;
+    config.localUrl = res.localUrl;
+    statusSpan.style.color = '#15803d';
+    statusSpan.textContent = '✓ Pengaturan tersimpan dan aktif seketika!';
+    setTimeout(() => { settingsModal.hidden = true; }, 1200);
+  } catch (err) {
+    statusSpan.style.color = '#b91c1c';
+    statusSpan.textContent = err.message;
+  }
+});
 
 // ---------- gate kode akses ----------
 function showGate(msg) {

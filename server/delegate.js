@@ -13,7 +13,7 @@ function planPrompt(team) {
     'MODE DELEGASI. Pecah permintaan user menjadi 1 sampai ' + MAX_TASKS + ' tugas untuk anggota timmu.',
     'Anggota tim yang bisa diberi tugas:',
     ...team.map((m) => `- ${m.id}: ${m.name}, ${m.role} (${m.focus})`),
-    'Balas HANYA dengan JSON valid, tanpa teks lain, tanpa tanda ```. Format:',
+    'Balas HANYA dengan JSON valid, tanpa teks lain, tanpa tanda ```, tanpa penjelasan dan tanpa basa-basi. Format:',
     '{"tugas":[{"agent":"<id>","brief":"instruksi singkat dan spesifik untuk anggota itu"}]}',
     'Satu anggota maksimal satu tugas. Pilih hanya anggota yang benar-benar relevan.',
   ].join('\n');
@@ -45,15 +45,28 @@ export async function delegate({ leader, messages, run, modelFor, maxTokens, sen
 
   // 1) Rencana (tidak ditampilkan mentah)
   send({ t: `🧭 **${leader.name.split(' ')[0]}** lagi memecah tugas...\n\n` });
-  let planText = '';
-  await run({
-    model: modelFor(leader),
-    system: buildSystemPrompt(leader) + '\n\n' + planPrompt(team),
-    messages: [{ role: 'user', content: userMsg }],
-    maxTokens: 300,
-    onText: (t) => { planText += t; },
-  });
-  const plan = parsePlan(planText, team);
+  const planMessages = [{ role: 'user', content: userMsg }];
+  const askPlan = async () => {
+    let text = '';
+    await run({
+      model: modelFor(leader),
+      system: buildSystemPrompt(leader) + '\n\n' + planPrompt(team),
+      messages: planMessages,
+      maxTokens: 300,
+      onText: (t) => { text += t; },
+    });
+    return text;
+  };
+
+  let planText = await askPlan();
+  let plan = parsePlan(planText, team);
+  if (!plan.length) {
+    // Model reasoning sering membungkus JSON dengan kalimat/penjelasan -> coba sekali lagi, lebih ketat.
+    console.warn('[delegate] rencana tidak valid, coba ulang:', JSON.stringify(planText.slice(0, 300)));
+    planText = await askPlan();
+    plan = parsePlan(planText, team);
+    if (!plan.length) console.warn('[delegate] rencana masih tidak valid:', JSON.stringify(planText.slice(0, 300)));
+  }
 
   if (!plan.length) {
     send({ t: '_Tidak ada yang perlu didelegasikan, gue kerjain sendiri._\n\n' });

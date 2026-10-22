@@ -1,6 +1,6 @@
-import { agentById, agentsOf, divisionById } from '../shared/roster.js';
+import { AGENTS, agentById, agentsOf, divisionById } from '../shared/roster.js';
 import { renderMarkdown } from './md.js';
-import { getHistory, setHistory, clearHistory, streamChat } from './chat.js';
+import { getHistory, setHistory, clearHistory, streamChat, streamDiscuss, sayTo } from './chat.js';
 
 const $ = (id) => document.getElementById(id);
 const initials = (name) => name.split(' ').map((p) => p[0]).slice(0, 2).join('').toUpperCase();
@@ -16,12 +16,19 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
     form: $('composer'),
     input: $('input'),
     send: $('btn-send'),
+    stop: $('btn-stop'),
     reset: $('btn-reset'),
     close: $('btn-close'),
+    discuss: $('btn-discuss'),
   };
 
   let currentId = null;
   const live = new Map(); // agentId -> { text, el, abort }
+
+  // State mode diskusi
+  let discussMode = false;
+  let activeDiscuss = null; // { id, topic, participants, text, el, abort }
+  let selectedParticipants = new Set();
 
   const scrollDown = (force = false) => {
     const m = els.messages;
@@ -72,6 +79,69 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
     }
   }
 
+  function renderDiscussSetup() {
+    const host = agentById(currentId);
+    if (!selectedParticipants.size) {
+      selectedParticipants = new Set([host.id]);
+      const sameDiv = agentsOf(host.division).find((m) => m.id !== host.id);
+      if (sameDiv) selectedParticipants.add(sameDiv.id);
+    }
+
+    const box = document.createElement('div');
+    box.className = 'discuss-setup';
+    box.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <h4>👥 Mode Diskusi / Townhall</h4>
+        <div style="display:flex;gap:6px;">
+          <button type="button" id="btn-select-div" class="btn-micro">Pilih 1 Divisi</button>
+          <button type="button" id="btn-select-all" class="btn-micro">Pilih Semua (${AGENTS.length})</button>
+        </div>
+      </div>
+      <p style="margin:0;font-size:12px;color:var(--ink-soft)">
+        Pilih peserta (bebas, bisa sampai seluruh kantor untuk Townhall). Tulis tujuan di bawah untuk mulai.
+      </p>
+      <div class="discuss-roster"></div>
+    `;
+
+    box.querySelector('#btn-select-all').addEventListener('click', () => {
+      selectedParticipants = new Set(AGENTS.map((a) => a.id));
+      render(currentId);
+    });
+
+    box.querySelector('#btn-select-div').addEventListener('click', () => {
+      selectedParticipants = new Set(agentsOf(host.division).map((a) => a.id));
+      render(currentId);
+    });
+
+    const rosterEl = box.querySelector('.discuss-roster');
+    const ordered = [host, ...AGENTS.filter((a) => a.id !== host.id)];
+    for (const a of ordered) {
+      const lbl = document.createElement('label');
+      lbl.className = 'chip-pick';
+      const checked = selectedParticipants.has(a.id);
+      lbl.innerHTML = `
+        <input type="checkbox" value="${a.id}" ${checked ? 'checked' : ''} />
+        <span>${a.name.split(' ')[0]}</span>
+        <i>${a.role.split(' ')[0]}</i>
+      `;
+      const cb = lbl.querySelector('input');
+      cb.addEventListener('change', () => {
+        if (cb.checked) {
+          selectedParticipants.add(a.id);
+        } else {
+          if (selectedParticipants.size <= 2) {
+            cb.checked = true;
+            return;
+          }
+          selectedParticipants.delete(a.id);
+        }
+        syncSend();
+      });
+      rosterEl.appendChild(lbl);
+    }
+    els.messages.appendChild(box);
+  }
+
   function render(agentId) {
     const agent = agentById(agentId);
     const div = divisionById(agent.division);
@@ -80,6 +150,8 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
     els.avatar.textContent = initials(agent.name);
     els.name.textContent = agent.name;
     els.role.textContent = `${agent.role} · ${div.name}`;
+
+    els.discuss.setAttribute('aria-pressed', String(discussMode));
 
     // rekan satu divisi
     els.mates.innerHTML = '';
@@ -99,6 +171,27 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
 
     els.messages.innerHTML = '';
     els.quick.innerHTML = '';
+
+    if (activeDiscuss) {
+      const banner = document.createElement('div');
+      banner.className = 'discuss-banner';
+      banner.innerHTML = `<span>👥 Diskusi tim sedang jalan...</span>`;
+      els.messages.appendChild(banner);
+      activeDiscuss.el = bubble('assistant', typingHtml);
+      els.messages.appendChild(activeDiscuss.el);
+      paint(activeDiscuss);
+      scrollDown(true);
+      syncSend();
+      return;
+    }
+
+    if (discussMode) {
+      renderDiscussSetup();
+      scrollDown(true);
+      syncSend();
+      return;
+    }
+
     const history = getHistory(agentId);
     const l = live.get(agentId);
     if (!history.length && !l) renderEmpty(agent);
@@ -115,15 +208,227 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
   }
 
   function syncSend() {
-    const busy = live.has(currentId);
-    els.send.disabled = busy || !els.input.value.trim();
-    els.input.placeholder = busy ? `${agentById(currentId).name.split(' ')[0]} lagi ngetik…` : 'Tulis pesan…';
+    const hasActiveDiscuss = Boolean(activeDiscuss);
+    const busyAgent = live.has(currentId);
+
+    if (hasActiveDiscuss) {
+      // Saat diskusi aktif: tombol stop muncul, tombol kirim jadi tombol interupsi/sanggah
+      els.stop.hidden = false;
+      els.send.disabled = !els.input.value.trim();
+      els.send.title = 'Sela / sanggah diskusi';
+      els.input.placeholder = 'Sela atau sanggah diskusi ini (masuk sebelum giliran berikutnya)…';
+      return;
+    }
+
+    els.stop.hidden = true;
+    els.send.title = 'Kirim';
+
+    if (discussMode) {
+      els.send.disabled = selectedParticipants.size < 2 || !els.input.value.trim();
+      els.input.placeholder = `Tulis goal rapat (${selectedParticipants.size} anggota terpilih)…`;
+      return;
+    }
+
+    els.send.disabled = busyAgent || !els.input.value.trim();
+    els.input.placeholder = busyAgent ? `${agentById(currentId).name.split(' ')[0]} lagi ngetik…` : 'Tulis pesan…';
+  }
+
+  function bubbleWithAuthor(agent, html, isSummary = false) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg assistant';
+    const div = divisionById(agent.division);
+
+    const author = document.createElement('div');
+    author.className = 'discuss-author';
+    if (div?.color) author.style.setProperty('--c', div.color);
+    author.innerHTML = isSummary
+      ? `<b>✅ Kesimpulan Rapat</b> <span>· dirangkum ${agent.name.split(' ')[0]}</span>`
+      : `<b>${agent.name.split(' ')[0]}</b> <span>· ${agent.role}</span>`;
+    wrap.appendChild(author);
+
+    const b = document.createElement('div');
+    b.className = 'bubble' + (isSummary ? ' discuss-summary' : '');
+    b.innerHTML = html;
+    wrap.appendChild(b);
+
+    const tools = document.createElement('div');
+    tools.className = 'tools';
+    tools.innerHTML = '<button type="button" data-copy>Salin</button>';
+    wrap.appendChild(tools);
+    return wrap;
+  }
+
+  function systemPill(text) {
+    const p = document.createElement('div');
+    p.className = 'system-pill';
+    p.textContent = text;
+    return p;
+  }
+
+  async function submitDiscuss(topic) {
+    topic = (topic || '').trim();
+    if (!topic || activeDiscuss || selectedParticipants.size < 2) return;
+
+    const list = Array.from(selectedParticipants);
+    const discId = `disc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const d = {
+      id: discId,
+      topic,
+      participants: list,
+      currentBubble: null,
+      currentText: '',
+      abort: new AbortController(),
+    };
+    activeDiscuss = d;
+
+    els.messages.innerHTML = '';
+    const banner = document.createElement('div');
+    banner.className = 'discuss-banner';
+    banner.innerHTML = `<span>👥 Rapat: <b>${topic.slice(0, 60)}</b> (${list.length} orang)</span>`;
+    els.messages.appendChild(banner);
+
+    els.input.value = '';
+    autosize();
+    scrollDown(true);
+    for (const pid of list) onStatus(pid, 'working');
+    syncSend();
+
+    const updateCurrent = (text) => {
+      if (!d.currentBubble) return;
+      const b = d.currentBubble.querySelector('.bubble');
+      b.innerHTML = text ? renderMarkdown(text) : typingHtml;
+      scrollDown();
+    };
+
+    try {
+      await streamDiscuss(discId, topic, list, {
+        signal: d.abort.signal,
+        onEvent: (evt) => {
+          switch (evt.event) {
+            case 'start':
+              els.messages.appendChild(systemPill(`Rapat dimulai dengan tujuan: "${topic}"`));
+              scrollDown(true);
+              break;
+
+            case 'user_interrupt':
+              els.messages.appendChild(bubble('user', '', { text: evt.text }));
+              scrollDown(true);
+              break;
+
+            case 'speech_start':
+              d.currentText = '';
+              d.currentBubble = bubbleWithAuthor(evt.agent, typingHtml, false);
+              els.messages.appendChild(d.currentBubble);
+              scrollDown(true);
+              break;
+
+            case 'speech_delta':
+              d.currentText += evt.t;
+              updateCurrent(d.currentText);
+              break;
+
+            case 'speech_end':
+              if (d.currentBubble) {
+                d.currentBubble.querySelector('.bubble').innerHTML = renderMarkdown(evt.cleanText || d.currentText);
+                d.currentBubble = null;
+                d.currentText = '';
+                scrollDown(true);
+              }
+              break;
+
+            case 'summary_start':
+              d.currentText = '';
+              d.currentBubble = bubbleWithAuthor(evt.agent, typingHtml, true);
+              els.messages.appendChild(d.currentBubble);
+              scrollDown(true);
+              break;
+
+            case 'summary_delta':
+              d.currentText += evt.t;
+              updateCurrent(d.currentText);
+              break;
+
+            case 'summary_end':
+              if (d.currentBubble) {
+                d.currentBubble.querySelector('.bubble').innerHTML = renderMarkdown(evt.cleanText || d.currentText);
+                d.currentBubble = null;
+                d.currentText = '';
+                scrollDown(true);
+              }
+              break;
+
+            case 'system_note':
+              els.messages.appendChild(systemPill(evt.text));
+              scrollDown(true);
+              break;
+
+            case 'closed':
+              els.messages.appendChild(systemPill(`🟢 Rapat selesai & ditutup${evt.reason ? ` (${evt.reason})` : ''}`));
+              scrollDown(true);
+              break;
+          }
+        },
+      });
+      activeDiscuss = null;
+      for (const pid of list) onStatus(pid, 'done');
+    } catch (err) {
+      activeDiscuss = null;
+      for (const pid of list) onStatus(pid, 'idle');
+      if (err.name !== 'AbortError') {
+        const e = bubble('assistant', '');
+        e.classList.add('error');
+        e.querySelector('.bubble').textContent = err.message;
+        e.querySelector('.tools')?.remove();
+        els.messages.appendChild(e);
+        if (err.code === 401) onNeedCode();
+      }
+    } finally {
+      syncSend();
+    }
+  }
+
+  async function interruptDiscuss(text) {
+    if (!activeDiscuss) return;
+    text = (text || '').trim();
+    if (!text) return;
+    els.input.value = '';
+    autosize();
+    const ok = await sayTo(activeDiscuss.id, text);
+    if (!ok) {
+      const note = bubble('assistant', '');
+      note.classList.add('error');
+      note.querySelector('.bubble').textContent = 'Gagal menyelakan — antrean sela penuh atau rapat sudah selesai.';
+      els.messages.appendChild(note);
+      scrollDown(true);
+    }
+  }
+
+  function stopDiscuss() {
+    if (!activeDiscuss) return;
+    activeDiscuss.abort.abort();
+    for (const pid of activeDiscuss.participants) onStatus(pid, 'idle');
+    els.messages.appendChild(systemPill('⏹️ Rapat dihentikan oleh moderator'));
+    activeDiscuss = null;
+    scrollDown(true);
+    syncSend();
   }
 
   async function submit(text) {
-    const id = currentId;
     text = (text || '').trim();
-    if (!id || !text || live.has(id)) return;
+    if (!text) return;
+
+    if (activeDiscuss) {
+      await interruptDiscuss(text);
+      return;
+    }
+
+    if (discussMode) {
+      await submitDiscuss(text);
+      return;
+    }
+
+    const id = currentId;
+    if (!id || live.has(id)) return;
 
     const history = getHistory(id);
     const sent = [...history, { role: 'user', content: text }];
@@ -166,7 +471,6 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
       if (err.name === 'AbortError') {
         setHistory(id, sent.slice(0, -1));
       } else {
-        // kembalikan teks ke kolom input supaya bisa dikirim ulang
         setHistory(id, sent.slice(0, -1));
         if (currentId === id) {
           l.el?.remove();
@@ -206,8 +510,15 @@ export function createPanel({ onSelect, onClose, onStatus, onNeedCode, isDemo })
       submit(els.input.value);
     }
   });
+  els.stop.addEventListener('click', stopDiscuss);
+  els.discuss.addEventListener('click', () => {
+    if (activeDiscuss) return;
+    discussMode = !discussMode;
+    if (currentId) render(currentId);
+  });
   els.close.addEventListener('click', () => onClose());
   els.reset.addEventListener('click', () => {
+    if (activeDiscuss) stopDiscuss();
     if (!currentId) return;
     live.get(currentId)?.abort.abort();
     clearHistory(currentId);

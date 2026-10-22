@@ -3,3 +3,11 @@
 
 # Ada Library Information
 *.ali
+
+# PM2
+node_modules/
+dist/
+logs/
+.pm2/
+.env
+.env.*
